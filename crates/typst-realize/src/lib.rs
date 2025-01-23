@@ -16,7 +16,7 @@ use typst_library::engine::Engine;
 use typst_library::foundations::{
     Content, Context, ContextElem, Element, NativeElement, Recipe, RecipeIndex, Selector,
     SequenceElem, Show, ShowSet, Style, StyleChain, StyleVec, StyledElem, Styles,
-    Synthesize, Transformation,
+    SymbolElem, Synthesize, Transformation,
 };
 use typst_library::html::{tag, HtmlElem};
 use typst_library::introspection::{Locatable, SplitLocator, Tag, TagElem};
@@ -295,7 +295,14 @@ fn visit_math_rules<'a>(
         // In normal realization, we apply regex show rules to consecutive
         // textual elements via `TEXTUAL` grouping. However, in math, this is
         // not desirable, so we just do it on a per-element basis.
-        if let Some(elem) = content.to_packed::<TextElem>() {
+        if let Some(elem) = content.to_packed::<SymbolElem>() {
+            if let Some(m) =
+                find_regex_match_in_str(elem.text.encode_utf8(&mut [0; 4]), styles)
+            {
+                visit_regex_match(s, &[(content, styles)], m)?;
+                return Ok(true);
+            }
+        } else if let Some(elem) = content.to_packed::<TextElem>() {
             if let Some(m) = find_regex_match_in_str(&elem.text, styles) {
                 visit_regex_match(s, &[(content, styles)], m)?;
                 return Ok(true);
@@ -306,6 +313,13 @@ fn visit_math_rules<'a>(
         if content.can::<dyn Mathy>() && !content.is::<EquationElem>() {
             let eq = EquationElem::new(content.clone()).pack().spanned(content.span());
             visit(s, s.store(eq), styles)?;
+            return Ok(true);
+        }
+
+        // Turn symbols into text.
+        if let Some(elem) = content.to_packed::<SymbolElem>() {
+            let text = TextElem::packed(elem.text).spanned(elem.span());
+            visit(s, s.store(text), styles)?;
             return Ok(true);
         }
     }
@@ -786,7 +800,7 @@ static HTML_DOCUMENT_RULES: &[&GroupingRule] =
 /// Grouping rules used in HTML fragment realization.
 static HTML_FRAGMENT_RULES: &[&GroupingRule] = &[&TEXTUAL, &CITES, &LIST, &ENUM, &TERMS];
 
-/// Grouping rules used in math realizatio.
+/// Grouping rules used in math realization.
 static MATH_RULES: &[&GroupingRule] = &[&CITES, &LIST, &ENUM, &TERMS];
 
 /// Groups adjacent textual elements for text show rule application.
@@ -1118,7 +1132,14 @@ fn visit_regex_match<'a>(
     m: RegexMatch<'a>,
 ) -> SourceResult<()> {
     let match_range = m.offset..m.offset + m.text.len();
-    let piece = TextElem::packed(m.text);
+
+    // Replace with the correct intuitive element kind: if matching against a
+    // symbol, return a SymbolElem, otherwise return a newly composed TextElem.
+    let piece = match elems {
+        &[(lone, _)] if lone.is::<SymbolElem>() => lone.clone(),
+        _ => TextElem::packed(m.text),
+    };
+
     let context = Context::new(None, Some(m.styles));
     let output = m.recipe.apply(s.engine, context.track(), piece)?;
 
@@ -1141,10 +1162,16 @@ fn visit_regex_match<'a>(
             continue;
         }
 
-        // At this point, we can have a `TextElem`, `SpaceElem`,
+        // At this point, we can have a `TextElem`, `SymbolElem`, `SpaceElem`,
         // `LinebreakElem`, or `SmartQuoteElem`. We now determine the range of
         // the element.
-        let len = content.to_packed::<TextElem>().map_or(1, |elem| elem.text.len());
+        let len = if let Some(elem) = content.to_packed::<TextElem>() {
+            elem.text.len()
+        } else if let Some(elem) = content.to_packed::<SymbolElem>() {
+            elem.text.len_utf8()
+        } else {
+            1 // The rest are Aascii, so just one byte.
+        };
         let elem_range = cursor..cursor + len;
 
         // If the element starts before the start of match, visit it fully or
