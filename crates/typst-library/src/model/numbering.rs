@@ -8,7 +8,7 @@ use ecow::{eco_format, EcoString, EcoVec};
 
 use crate::diag::SourceResult;
 use crate::engine::Engine;
-use crate::foundations::{cast, func, Context, Func, Str, Value};
+use crate::foundations::{cast, func, Content, Context, Func, Str, Value};
 use crate::text::Case;
 
 /// Applies a numbering to a sequence of numbers.
@@ -96,7 +96,7 @@ pub enum Numbering {
     /// A pattern with prefix, numbering, lower / upper case and suffix.
     Pattern(NumberingPattern),
     /// A closure mapping from an item's number to content.
-    Func(Func),
+    Func(NumberingFunc),
 }
 
 impl Numbering {
@@ -109,7 +109,7 @@ impl Numbering {
     ) -> SourceResult<Value> {
         Ok(match self {
             Self::Pattern(pattern) => Value::Str(pattern.apply(numbers).into()),
-            Self::Func(func) => func.call(engine, context, numbers.iter().copied())?,
+            Self::Func(func) => func.apply(engine, context, numbers)?,
         })
     }
 
@@ -117,6 +117,9 @@ impl Numbering {
     pub fn trimmed(mut self) -> Self {
         if let Self::Pattern(pattern) = &mut self {
             pattern.trimmed = true;
+        }
+        if let Self::Func(func) = &mut self {
+            func.trimmed = true;
         }
         self
     }
@@ -135,7 +138,7 @@ cast! {
         Self::Func(func) => func.into_value(),
     },
     v: NumberingPattern => Self::Pattern(v),
-    v: Func => Self::Func(v),
+    v: NumberingFunc => Self::Func(v),
 }
 
 /// How to turn a number into text.
@@ -246,6 +249,65 @@ cast! {
         pat.into_value()
     },
     v: Str => v.parse()?,
+}
+
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct NumberingFunc {
+    pub func: Func,
+    pub trimmed: bool,
+}
+
+impl NumberingFunc {
+    /// Apply the function to the given numbers.
+    pub fn apply(
+        &self,
+        engine: &mut Engine,
+        context: Tracked<Context>,
+        numbers: &[u64],
+    ) -> SourceResult<Value> {
+        let result = self.func.call(engine, context, numbers.iter().copied())?;
+
+        if let Value::Dict(dict) = &result {
+            if self.trimmed {
+                if let Ok(value) = dict.get("numbering") {
+                    return Ok(value.clone());
+                }
+            } else {
+                let cast_or_default = |key| {
+                    dict.get(key)
+                        .unwrap_or(&Value::None)
+                        .clone()
+                        .cast::<Content>()
+                        .unwrap_or_default()
+                };
+
+                let prefix = cast_or_default("prefix");
+                let suffix = cast_or_default("suffix");
+                let numbering = cast_or_default("numbering");
+
+                return Ok(Value::Content(Content::sequence([
+                    prefix, numbering, suffix,
+                ])));
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+impl From<Func> for NumberingFunc {
+    fn from(func: Func) -> Self {
+        Self { func, trimmed: false }
+    }
+}
+
+cast! {
+    NumberingFunc,
+    self => {
+        let func = self.func.clone();
+        func.into_value()
+    },
+    v: Func => Self::from(v),
 }
 
 /// Different kinds of numberings.
