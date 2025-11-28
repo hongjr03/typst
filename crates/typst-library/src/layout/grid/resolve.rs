@@ -265,6 +265,8 @@ impl ResolvableCell for Packed<TableCell> {
         );
         cell.breakable.set(Smart::Custom(breakable));
         cell.kind.set(kind);
+        cell.colspan.set(colspan);
+        cell.rowspan.set(rowspan);
         Cell {
             body: self.pack(),
             fill,
@@ -359,6 +361,8 @@ impl ResolvableCell for Packed<GridCell> {
             }),
         );
         cell.breakable.set(Smart::Custom(breakable));
+        cell.colspan.set(colspan);
+        cell.rowspan.set(rowspan);
         Cell {
             body: self.pack(),
             fill,

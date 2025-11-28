@@ -492,3 +492,55 @@
 --- issue-6399-grid-cell-rowspan-set-rule paged ---
 #set grid.cell(rowspan: 2)
 #grid(columns: 2, [hehe])
+
+--- issue-7263-grid-rowspan-show-rule-spans-table paged ---
+// Show rules can inspect resolved table spans.
+#set page(height: 8em)
+#show table.cell: it => {
+  let pos = (it.x, it.y)
+
+  if pos == (0, 0) {
+    test(it.colspan, 1)
+    test(it.rowspan, 1)
+  } else if pos == (1, 0) {
+    test(it.colspan, 2)
+    test(it.rowspan, 1)
+  } else if pos == (0, 1) {
+    test(it.colspan, 1)
+    test(it.rowspan, 2)
+  }
+
+  it
+}
+#table(
+  columns: 3,
+  [A], table.cell(colspan: 2)[B],
+  table.cell(rowspan: 2)[C], [D], [E],
+  [F], [G], [H],
+)
+
+--- issue-7263-grid-rowspan-show-rule-spans-grid paged ---
+// Show rules can inspect resolved grid spans.
+#set page(height: 8em)
+#show grid.cell: it => {
+  let pos = (it.x, it.y)
+
+  if pos == (0, 0) {
+    test(it.colspan, 1)
+    test(it.rowspan, 1)
+  } else if pos == (1, 0) {
+    test(it.colspan, 2)
+    test(it.rowspan, 1)
+  } else if pos == (0, 1) {
+    test(it.colspan, 1)
+    test(it.rowspan, 2)
+  }
+
+  it
+}
+#grid(
+  columns: 3,
+  [A], grid.cell(colspan: 2)[B],
+  grid.cell(rowspan: 2)[C], [D], [E],
+  [F], [G], [H],
+)
