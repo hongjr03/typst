@@ -2,7 +2,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::TransparentWrapper;
-use krilla::geom::{PathBuilder, Transform};
+use krilla::geom::PathBuilder;
+use krilla::num::NormalizedF32;
 use krilla::surface::{Location, Surface};
 use krilla::text::GlyphId;
 use ttf_parser::OutlineBuilder;
@@ -25,10 +26,6 @@ pub(crate) fn handle_text(
     surface: &mut Surface,
     gc: &mut GlobalContext,
 ) -> SourceResult<()> {
-    let mut handle = tags::text(gc, fc, surface, t);
-    let surface = handle.surface();
-
-    let font = convert_font(gc, t.font.clone())?;
     let fill = paint::convert_fill(
         gc,
         &t.fill,
@@ -46,60 +43,155 @@ pub(crate) fn handle_text(
     let text = t.text.as_str();
     let size = t.size;
     let glyphs: &[PdfGlyph] = TransparentWrapper::wrap_slice(t.glyphs.as_slice());
+    let synthesize_weight = t.synthesize.embolden.is_some();
+    let font = convert_font(gc, t.font.clone())?;
 
     surface.push_transform(&fc.state().transform().to_krilla());
     let mut surface = defer(surface, |s| s.pop());
-    surface.set_fill(Some(fill));
-    surface.set_stroke(stroke);
-    surface.draw_glyphs(
-        krilla::geom::Point::from_xy(0.0, 0.0),
-        glyphs,
-        font.clone(),
-        text,
-        size.to_f32(),
-        false,
-    );
-    if t.synthesize.embolden.is_some() {
-        tags::artifact(gc, &mut surface, |surface| {
+    if !synthesize_weight {
+        surface.set_fill(Some(fill));
+        surface.set_stroke(stroke);
+        let mut handle = tags::text(gc, fc, &mut surface, t);
+        let surface = handle.surface();
+        surface.draw_glyphs(
+            krilla::geom::Point::from_xy(0.0, 0.0),
+            glyphs,
+            font,
+            text,
+            size.to_f32(),
+            false,
+        );
+    } else {
+        {
+            let mut hidden_fill = fill.clone();
+            hidden_fill.opacity = NormalizedF32::ZERO;
+            surface.set_fill(Some(hidden_fill));
             surface.set_stroke(None);
-            draw_synthesized_glyphs(t, surface);
+
+            let mut handle = tags::text(gc, fc, &mut surface, t);
+            let surface = handle.surface();
+            surface.draw_glyphs(
+                krilla::geom::Point::from_xy(0.0, 0.0),
+                glyphs,
+                font,
+                text,
+                size.to_f32(),
+                false,
+            );
+        }
+
+        tags::artifact(gc, &mut surface, |surface| {
+            surface.set_fill(Some(fill));
+            surface.set_stroke(stroke);
+            draw_glyphs_with_synthetic_weight(t, surface);
         });
     }
 
     Ok(())
 }
 
-fn draw_synthesized_glyphs(t: &TextItem, surface: &mut Surface) -> Option<()> {
+fn draw_glyphs_with_synthetic_weight(t: &TextItem, surface: &mut Surface) -> Option<()> {
     let mut x = 0.0;
     let y = 0.0;
     let font_size = t.size.to_f32();
     let scale = font_size / t.font.units_per_em() as f32;
     let embolden = t.synthesize.embolden?;
+    let mut glyphs = KrillaPathBuilder(PathBuilder::new());
+    let mut overlay = KrillaPathBuilder(PathBuilder::new());
+    let font_bbox = t.font.ttf().global_bounding_box();
+    let pad = embolden.to_f32().max(1.0);
+    let mut left = f32::INFINITY;
+    let mut top = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    let mut bottom = f32::NEG_INFINITY;
 
     for glyph in &t.glyphs {
+        let mut outline = GlyphOutline::new();
+        t.font
+            .ttf()
+            .outline_glyph(ttf_parser::GlyphId(glyph.id), &mut outline)?;
         let emboldened = synthetic_weight_overlay(&t.font, t.size, glyph, embolden)?;
 
-        let mut builder = KrillaPathBuilder(PathBuilder::new());
-        GlyphOutline::emit_path(&emboldened, &mut builder);
-        let path = builder.0.finish()?;
+        let tx = x + glyph.x_offset.at(t.size).to_f32();
+        let ty = y - glyph.y_offset.at(t.size).to_f32();
 
-        let transform = Transform::from_row(
-            scale,
-            0.0,
-            0.0,
-            -scale,
-            x + glyph.x_offset.at(t.size).to_f32(),
-            y - glyph.y_offset.at(t.size).to_f32(),
-        );
+        left = left.min(tx + font_bbox.x_min as f32 * scale - pad);
+        top = top.min(ty - font_bbox.y_max as f32 * scale - pad);
+        right = right.max(tx + font_bbox.x_max as f32 * scale + pad);
+        bottom = bottom.max(ty - font_bbox.y_min as f32 * scale + pad);
 
-        surface.push_transform(&transform);
-        surface.draw_path(&path);
-        surface.pop();
+        let mut glyph_builder = TransformedPathBuilder { inner: &mut glyphs, scale, tx, ty };
+        outline.emit(&mut glyph_builder);
+
+        let mut overlay_builder = TransformedPathBuilder { inner: &mut overlay, scale, tx, ty };
+        GlyphOutline::emit_path(&emboldened, &mut overlay_builder);
 
         x += glyph.x_advance.at(t.size).to_f32();
     }
 
+    // Krilla maps gradients for paths through the path bbox. Add the same
+    // zero-area line to both paths so the glyphs and overlay share a bbox,
+    // without merging their contours and changing fill winding behavior.
+    expand_path_bbox(&mut glyphs, left, top, right, bottom);
+    expand_path_bbox(&mut overlay, left, top, right, bottom);
+
+    surface.draw_path(&glyphs.0.finish()?);
+    surface.draw_path(&overlay.0.finish()?);
+
     Some(())
+}
+
+fn expand_path_bbox(
+    builder: &mut KrillaPathBuilder,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) {
+    builder.move_to(left, top);
+    builder.line_to(right, bottom);
+}
+
+struct TransformedPathBuilder<'a> {
+    inner: &'a mut KrillaPathBuilder,
+    scale: f32,
+    tx: f32,
+    ty: f32,
+}
+
+impl TransformedPathBuilder<'_> {
+    fn transform(&self, x: f32, y: f32) -> (f32, f32) {
+        (self.tx + x * self.scale, self.ty - y * self.scale)
+    }
+}
+
+impl OutlineBuilder for TransformedPathBuilder<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.transform(x, y);
+        self.inner.move_to(x, y);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.transform(x, y);
+        self.inner.line_to(x, y);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (x1, y1) = self.transform(x1, y1);
+        let (x, y) = self.transform(x, y);
+        self.inner.quad_to(x1, y1, x, y);
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (x1, y1) = self.transform(x1, y1);
+        let (x2, y2) = self.transform(x2, y2);
+        let (x, y) = self.transform(x, y);
+        self.inner.curve_to(x1, y1, x2, y2, x, y);
+    }
+
+    fn close(&mut self) {
+        self.inner.close();
+    }
 }
 
 struct KrillaPathBuilder(PathBuilder);

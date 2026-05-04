@@ -127,7 +127,7 @@ pub fn artifact<T>(
     surface: &mut Surface,
     f: impl FnOnce(&mut Surface) -> T,
 ) -> T {
-    if disabled(gc) {
+    if disabled(gc) || gc.tags.tree.parent_artifact().is_some() {
         return f(surface);
     }
 
