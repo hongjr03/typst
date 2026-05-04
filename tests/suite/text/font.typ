@@ -195,6 +195,25 @@ The number 123.
 #set text(font: ((name: "Ubuntu", covers: regex("\d")), "IBM Plex Serif"))
 #context test(text.font, ((name: "ubuntu", covers: regex("\d")), "ibm plex serif"))
 
+--- text-synthesis-reflection paged empty ---
+#context test(text.synthesis, none)
+#set text(synthesis: none)
+#context test(text.synthesis, none)
+#set text(synthesis: "weight")
+#context test(text.synthesis, "weight")
+
+--- text-synthesis-unimplemented eval ---
+// Error: 22-29 expected none, "weight", or array
+#set text(synthesis: "style")
+
+--- text-synthesis-all-unimplemented eval ---
+// Error: 22-27 expected none, "weight", or array
+#set text(synthesis: "all")
+
+--- text-synthesis-string-none-unimplemented eval ---
+// Error: 22-28 expected none, "weight", or array
+#set text(synthesis: "none")
+
 --- issue-5262-text-negative-size paged ---
 #set text(-1pt)
 

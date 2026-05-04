@@ -14,8 +14,9 @@ use typst_library::foundations::{Regex, Smart, StyleChain};
 use typst_library::layout::{Abs, Dir, Em, Frame, FrameItem, Point, Rel, Size};
 use typst_library::model::{JustificationLimits, ParElem};
 use typst_library::text::{
-    Font, FontFamily, FontVariant, Glyph, Lang, Region, ShiftSettings, TextEdgeBounds,
-    TextElem, TextItem, families, features, is_default_ignorable, language, variant,
+    Font, FontFamily, FontVariant, FontWeight, Glyph, Lang, Region, ShiftSettings,
+    Synthesize, TextEdgeBounds, TextElem, TextItem, families, features,
+    is_default_ignorable, language, variant,
 };
 use typst_utils::SliceExt;
 use unicode_bidi::{BidiInfo, Level as BidiLevel};
@@ -340,6 +341,7 @@ impl<'a> ShapedText<'a> {
         let decos = self.styles.get_cloned(TextElem::deco);
         let fill = self.styles.get_ref(TextElem::fill);
         let stroke = self.styles.resolve(TextElem::stroke);
+        let synthesis = self.styles.get(TextElem::synthesis);
         let span_offset = self.styles.get(TextElem::span_offset);
 
         let mut i = 0;
@@ -433,6 +435,13 @@ impl<'a> ShapedText<'a> {
                 })
                 .collect();
 
+            let text_synthesize = Synthesize {
+                embolden: synthesis
+                    .weight()
+                    .then(|| synthetic_weight_embolden(&font, self.variant, glyph_size))
+                    .flatten(),
+            };
+
             let item = TextItem {
                 font,
                 size: glyph_size,
@@ -440,6 +449,7 @@ impl<'a> ShapedText<'a> {
                 region: self.region,
                 fill: fill.clone(),
                 stroke: stroke.clone().map(|s| s.unwrap_or_default()),
+                synthesize: text_synthesize,
                 text: self.text[range.start - self.base..range.end - self.base].into(),
                 glyphs,
             };
@@ -1193,6 +1203,33 @@ fn determine_shift(
         })
 }
 
+/// The fake-bold emboldening strength used by MS Office, according to analysis
+/// in typst/typst#394, for a regular-to-bold weight jump.
+const SYNTHETIC_BOLD_EM: f64 = 1.0 / 35.0;
+
+fn synthetic_weight_embolden(font: &Font, target: FontVariant, size: Abs) -> Option<Abs> {
+    let actual = font.info().variant.weight;
+    synthetic_weight_strength(target.weight, actual, size)
+}
+
+fn synthetic_weight_strength(
+    target: FontWeight,
+    actual: FontWeight,
+    size: Abs,
+) -> Option<Abs> {
+    let missing = target.to_number().saturating_sub(actual.to_number());
+
+    // Tiny differences are usually just metadata noise or a close enough
+    // substitute such as 650 for 700. Synthetic weight should only compensate
+    // for visibly missing weight.
+    if missing <= 100 {
+        return None;
+    }
+
+    let ratio = (missing as f64 / 300.0) * SYNTHETIC_BOLD_EM;
+    Some(Abs::pt(size.to_pt() * ratio))
+}
+
 /// Create a shape plan.
 #[comemo::memoize]
 pub fn create_shape_plan(
@@ -1486,4 +1523,44 @@ fn is_justifiable(
         || is_cjk_left_aligned_punctuation(c, x_advance, stretchability, style)
         || is_cjk_right_aligned_punctuation(c, x_advance, stretchability)
         || is_cjk_center_aligned_punctuation(c, style)
+}
+
+#[cfg(test)]
+mod tests {
+    use typst_library::layout::Abs;
+    use typst_library::text::FontWeight;
+
+    use super::{SYNTHETIC_BOLD_EM, synthetic_weight_strength};
+
+    #[test]
+    fn synthetic_weight_tracks_missing_weight() {
+        let size = Abs::pt(35.0);
+        let thickness =
+            synthetic_weight_strength(FontWeight::BOLD, FontWeight::REGULAR, size)
+                .unwrap();
+        assert!((thickness.to_pt() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn synthetic_weight_ignores_close_variants() {
+        assert!(
+            synthetic_weight_strength(
+                FontWeight::BOLD,
+                FontWeight::SEMIBOLD,
+                Abs::pt(12.0),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn synthetic_weight_scales_with_weight_gap() {
+        let size = Abs::pt(10.0);
+        let thickness =
+            synthetic_weight_strength(FontWeight::BLACK, FontWeight::REGULAR, size)
+                .unwrap();
+        assert!(
+            (thickness.to_pt() - 10.0 * (500.0 / 300.0) * SYNTHETIC_BOLD_EM).abs() < 1e-6
+        );
+    }
 }

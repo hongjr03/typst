@@ -280,6 +280,7 @@ impl GlyphFragment {
             size: styles.resolve(TextElem::size),
             fill: styles.get_ref(TextElem::fill).as_decoration(),
             stroke: styles.resolve(TextElem::stroke).map(|s| s.unwrap_or_default()),
+            synthesize: Default::default(),
             lang: styles.get(TextElem::lang),
             region: styles.get(TextElem::region),
             glyphs,
