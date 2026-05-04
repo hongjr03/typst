@@ -5,7 +5,9 @@ use tiny_skia as sk;
 use ttf_parser::{GlyphId, OutlineBuilder};
 use typst_library::layout::{Abs, Axes, Point, Size};
 use typst_library::text::color::{glyph_frame, should_outline};
-use typst_library::text::{Font, TextItem};
+use typst_library::text::{
+    Font, Glyph, GlyphOutline, TextItem, synthetic_weight_overlay,
+};
 use typst_library::visualize::{FixedStroke, Paint};
 
 use crate::paint::{self, GradientSampler, PaintSampler, TilingSampler};
@@ -22,7 +24,7 @@ pub fn render_text(canvas: &mut sk::Pixmap, state: State, text: &TextItem) {
 
         if should_outline(&text.font, glyph) {
             let state = state.pre_translate(Point::new(x_offset, -y_offset));
-            render_outline_glyph(canvas, state, text, id);
+            render_outline_glyph(canvas, state, text, glyph, id);
         } else {
             let upem = text.font.units_per_em();
             let text_scale = text.size / upem;
@@ -44,6 +46,7 @@ fn render_outline_glyph(
     canvas: &mut sk::Pixmap,
     state: State,
     text: &TextItem,
+    glyph: &Glyph,
     id: GlyphId,
 ) -> Option<()> {
     let ts = &state.transform;
@@ -58,11 +61,22 @@ fn render_outline_glyph(
         || ts.sx != ts.sy
         || text.stroke.is_some()
         || text.size < Abs::zero()
+        || text.synthesize.embolden.is_some()
     {
-        let path = {
+        let (path, emboldened) = {
+            let mut outline = GlyphOutline::new();
+            text.font.ttf().outline_glyph(id, &mut outline)?;
             let mut builder = WrappedPathBuilder(sk::PathBuilder::new());
-            text.font.ttf().outline_glyph(id, &mut builder)?;
-            builder.0.finish()?
+            outline.emit(&mut builder);
+            let path = builder.0.finish()?;
+            let emboldened = text.synthesize.embolden.and_then(|strength| {
+                let path =
+                    synthetic_weight_overlay(&text.font, text.size, glyph, strength)?;
+                let mut builder = WrappedPathBuilder(sk::PathBuilder::new());
+                GlyphOutline::emit_path(&path, &mut builder);
+                builder.0.finish()
+            });
+            (path, emboldened)
         };
 
         let scale = text.size.to_f32() / text.font.units_per_em() as f32;
@@ -85,6 +99,9 @@ fn render_outline_glyph(
             None,
         );
         canvas.fill_path(&path, &paint, rule, ts, state.mask);
+        if let Some(emboldened) = &emboldened {
+            canvas.fill_path(emboldened, &paint, rule, ts, state.mask);
+        }
 
         if let Some(FixedStroke { paint, thickness, cap, join, dash, miter_limit }) =
             &text.stroke

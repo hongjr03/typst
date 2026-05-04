@@ -116,6 +116,21 @@ pub fn tiling<T>(
     res
 }
 
+pub fn artifact<T>(
+    gc: &mut GlobalContext,
+    surface: &mut Surface,
+    f: impl FnOnce(&mut Surface) -> T,
+) -> T {
+    if disabled(gc) {
+        return f(surface);
+    }
+
+    surface.start_tagged(ContentTag::Artifact(ArtifactType::Other));
+    let res = f(surface);
+    surface.end_tagged();
+    res
+}
+
 /// Whether tag generation is currently disabled. Either because it has been
 /// disabled by the user using the [`PdfOptions::tagged`] flag, or we're inside
 /// a tiling.

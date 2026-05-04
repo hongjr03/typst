@@ -19,6 +19,8 @@ pub struct TextItem {
     pub fill: Paint,
     /// Glyph stroke.
     pub stroke: Option<FixedStroke>,
+    /// Synthetic styling applied by render backends.
+    pub synthesize: Synthesize,
     /// The natural language of the text.
     pub lang: Lang,
     /// The region of the text.
@@ -28,6 +30,13 @@ pub struct TextItem {
     /// The glyphs. The number of glyphs may be different from the number of
     /// characters in the plain text due to e.g. ligatures.
     pub glyphs: Vec<Glyph>,
+}
+
+/// Synthetic styling applied by render backends.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct Synthesize {
+    /// Embolden glyph outlines by this amount in output units.
+    pub embolden: Option<Abs>,
 }
 
 impl TextItem {

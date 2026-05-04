@@ -2,11 +2,15 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::TransparentWrapper;
+use krilla::geom::{PathBuilder, Transform};
 use krilla::surface::{Location, Surface};
 use krilla::text::GlyphId;
+use ttf_parser::OutlineBuilder;
 use typst_library::diag::{SourceResult, bail};
 use typst_library::layout::Size;
-use typst_library::text::{Font, Glyph, TextItem};
+use typst_library::text::{
+    Font, Glyph, GlyphOutline, TextItem, synthetic_weight_overlay,
+};
 use typst_library::visualize::FillRule;
 use typst_syntax::Span;
 use typst_utils::defer;
@@ -59,8 +63,71 @@ pub(crate) fn handle_text(
         size.to_f32(),
         false,
     );
+    if t.synthesize.embolden.is_some() {
+        tags::artifact(gc, &mut surface, |surface| {
+            surface.set_stroke(None);
+            draw_synthesized_glyphs(t, surface);
+        });
+    }
 
     Ok(())
+}
+
+fn draw_synthesized_glyphs(t: &TextItem, surface: &mut Surface) -> Option<()> {
+    let mut x = 0.0;
+    let y = 0.0;
+    let font_size = t.size.to_f32();
+    let scale = font_size / t.font.units_per_em() as f32;
+    let embolden = t.synthesize.embolden?;
+
+    for glyph in &t.glyphs {
+        let emboldened = synthetic_weight_overlay(&t.font, t.size, glyph, embolden)?;
+
+        let mut builder = KrillaPathBuilder(PathBuilder::new());
+        GlyphOutline::emit_path(&emboldened, &mut builder);
+        let path = builder.0.finish()?;
+
+        let transform = Transform::from_row(
+            scale,
+            0.0,
+            0.0,
+            -scale,
+            x + glyph.x_offset.at(t.size).to_f32(),
+            y - glyph.y_offset.at(t.size).to_f32(),
+        );
+
+        surface.push_transform(&transform);
+        surface.draw_path(&path);
+        surface.pop();
+
+        x += glyph.x_advance.at(t.size).to_f32();
+    }
+
+    Some(())
+}
+
+struct KrillaPathBuilder(PathBuilder);
+
+impl OutlineBuilder for KrillaPathBuilder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.0.move_to(x, y);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.0.line_to(x, y);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.0.quad_to(x1, y1, x, y);
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.0.cubic_to(x1, y1, x2, y2, x, y);
+    }
+
+    fn close(&mut self) {
+        self.0.close();
+    }
 }
 
 fn convert_font(

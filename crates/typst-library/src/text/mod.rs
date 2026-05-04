@@ -2,6 +2,7 @@
 
 mod case;
 mod deco;
+mod embolden;
 mod font;
 mod item;
 mod lang;
@@ -17,6 +18,7 @@ mod space;
 
 pub use self::case::*;
 pub use self::deco::*;
+pub use self::embolden::*;
 pub use self::font::*;
 pub use self::item::*;
 pub use self::lang::*;
@@ -291,6 +293,18 @@ pub struct TextElem {
     /// ```
     #[ghost]
     pub stroke: Option<Stroke>,
+
+    /// Which missing font properties Typst may synthesize.
+    ///
+    /// When set to `{weight}`, Typst can synthesize heavier glyphs if the
+    /// current font has no sufficiently heavy variant.
+    ///
+    /// ```example
+    /// #set text(synthesis: "weight")
+    /// This can be *synthetically bold.*
+    /// ```
+    #[ghost]
+    pub synthesis: TextSynthesis,
 
     /// The amount of space that should be added between characters.
     ///
@@ -983,6 +997,64 @@ pub fn families(styles: StyleChain<'_>) -> impl Iterator<Item = &'_ FontFamily> 
 
     let tail = if styles.get(TextElem::fallback) { fallbacks.as_slice() } else { &[] };
     styles.get_ref(TextElem::font).into_iter().chain(tail.iter())
+}
+
+/// Controls which missing font properties may be synthesized.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct TextSynthesis(u8);
+
+impl TextSynthesis {
+    /// Synthesize font weight when the selected font is too light.
+    pub const WEIGHT: Self = Self(1 << 0);
+    /// Whether no font synthesis is enabled.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether synthetic font weight is enabled.
+    pub fn weight(self) -> bool {
+        self.contains(Self::WEIGHT)
+    }
+
+    /// Whether this contains all flags from `other`.
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+cast! {
+    TextSynthesis,
+    self => if self.is_empty() {
+        NoneValue.into_value()
+    } else {
+        let mut array = Array::new();
+        if self.contains(Self::WEIGHT) {
+            array.push("weight".into_value());
+        }
+        if array.len() == 1 {
+            array.into_iter().next().unwrap()
+        } else {
+            array.into_value()
+        }
+    },
+    _: NoneValue => Self::default(),
+    "weight" => Self::WEIGHT,
+    values: Array => {
+        let len = values.len();
+        let mut synthesis = Self::default();
+        for value in values {
+            let flag = value.cast::<Self>()?;
+            if flag.is_empty() && len > 1 {
+                bail!("`none` cannot be combined with other synthesis options");
+            }
+            synthesis.insert(flag);
+        }
+        synthesis
+    }
 }
 
 /// Resolve the font variant.

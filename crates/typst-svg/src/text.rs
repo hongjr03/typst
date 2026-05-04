@@ -5,8 +5,8 @@ use ecow::EcoString;
 use ttf_parser::GlyphId;
 use typst_library::foundations::Bytes;
 use typst_library::layout::{Abs, Point, Ratio, Size, Transform};
-use typst_library::text::color::colr_glyph_to_svg;
-use typst_library::text::{Font, TextItem};
+use typst_library::text::color::{colr_glyph_to_svg, should_outline};
+use typst_library::text::{Font, Glyph, GlyphOutline, TextItem, synthetic_weight_overlay};
 use typst_library::visualize::{
     ExchangeFormat, FillRule, Image, Paint, RasterImage, RelativeTo,
 };
@@ -42,24 +42,7 @@ impl SVGRenderer<'_> {
             let x_offset = x + glyph.x_offset.at(text.size).to_pt();
             let y_offset = y + glyph.y_offset.at(text.size).to_pt();
 
-            self.render_colr_glyph(text, id, x_offset, y_offset, scale)
-                .or_else(|| self.render_svg_glyph(text, id, x_offset, y_offset, scale))
-                .or_else(|| self.render_bitmap_glyph(text, id, x_offset, y_offset))
-                .or_else(|| {
-                    self.render_outline_glyph(
-                        state
-                            .pre_concat(Transform::scale(Ratio::one(), -Ratio::one()))
-                            .pre_translate(Point::new(
-                                Abs::pt(x_offset),
-                                Abs::pt(y_offset),
-                            )),
-                        text,
-                        id,
-                        x_offset,
-                        y_offset,
-                        scale,
-                    )
-                });
+            self.render_glyph(state, text, glyph, id, x_offset, y_offset, scale);
 
             x += glyph.x_advance.at(text.size).to_pt();
             y += glyph.y_advance.at(text.size).to_pt();
@@ -186,6 +169,7 @@ impl SVGRenderer<'_> {
         x_offset: f64,
         y_offset: f64,
         scale: f64,
+        write_user_stroke: bool,
     ) -> Option<()> {
         let scale = Ratio::new(scale);
         let path = convert_outline_glyph_to_path(&text.font, glyph_id, scale)?;
@@ -196,6 +180,30 @@ impl SVGRenderer<'_> {
         let width = glyph_size.width() as f64 * scale.get();
         let height = glyph_size.height() as f64 * scale.get();
 
+        self.render_path_glyph(
+            state,
+            text,
+            id,
+            x_offset,
+            y_offset,
+            Size::new(Abs::pt(width), Abs::pt(height)),
+            write_user_stroke,
+        );
+
+        Some(())
+    }
+
+    fn render_path_glyph(
+        &mut self,
+        state: State,
+        text: &TextItem,
+        id: impl std::fmt::Display,
+        x_offset: f64,
+        y_offset: f64,
+        size: Size,
+        write_user_stroke: bool,
+    ) {
+
         self.xml.start_element("use");
         self.xml.write_attribute_fmt("xlink:href", format_args!("#{id}"));
         self.xml.write_attribute_fmt("x", format_args!("{x_offset}"));
@@ -203,19 +211,86 @@ impl SVGRenderer<'_> {
         self.write_fill(
             &text.fill,
             FillRule::default(),
-            Size::new(Abs::pt(width), Abs::pt(height)),
+            size,
             self.text_paint_transform(state, &text.fill),
         );
-        if let Some(stroke) = &text.stroke {
+        if let Some(stroke) = &text.stroke
+            && write_user_stroke
+        {
             self.write_stroke(
                 stroke,
-                Size::new(Abs::pt(width), Abs::pt(height)),
+                size,
                 self.text_paint_transform(state, &stroke.paint),
             );
         }
         self.xml.end_element();
+    }
 
-        Some(())
+    #[allow(clippy::too_many_arguments)]
+    fn render_glyph(
+        &mut self,
+        state: &State,
+        text: &TextItem,
+        glyph: &Glyph,
+        id: GlyphId,
+        x_offset: f64,
+        y_offset: f64,
+        scale: f64,
+    ) {
+        if !should_outline(&text.font, glyph) {
+            if self.render_colr_glyph(text, id, x_offset, y_offset, scale).is_some()
+                || self.render_svg_glyph(text, id, x_offset, y_offset, scale).is_some()
+                || self.render_bitmap_glyph(text, id, x_offset, y_offset).is_some()
+            {
+                return;
+            }
+        }
+
+        self.render_outline_glyph(
+            state
+                .pre_concat(Transform::scale(Ratio::one(), -Ratio::one()))
+                .pre_translate(Point::new(Abs::pt(x_offset), Abs::pt(y_offset))),
+            text,
+            id,
+            x_offset,
+            y_offset,
+            scale,
+            true,
+        );
+
+        if let Some(embolden) = text.synthesize.embolden {
+            let outline_scale = Ratio::new(scale);
+            let Some(emboldened) =
+                synthetic_weight_overlay(&text.font, text.size, glyph, embolden)
+            else {
+                return;
+            };
+            let mut builder = SvgPathBuilder::with_scale(outline_scale);
+            GlyphOutline::emit_path(&emboldened, &mut builder);
+            let path = builder.path;
+            let outline_id = self.glyphs.insert_with(
+                hash128(&(&text.font, id, outline_scale, embolden)),
+                || RenderedGlyph::Path(path),
+            );
+
+            let Some(glyph_size) = text.font.ttf().glyph_bounding_box(id) else {
+                return;
+            };
+            self.render_path_glyph(
+                state
+                    .pre_concat(Transform::scale(Ratio::one(), -Ratio::one()))
+                    .pre_translate(Point::new(Abs::pt(x_offset), Abs::pt(y_offset))),
+                text,
+                outline_id,
+                x_offset,
+                y_offset,
+                Size::new(
+                    Abs::pt(glyph_size.width() as f64 * outline_scale.get()),
+                    Abs::pt(glyph_size.height() as f64 * outline_scale.get()),
+                ),
+                false,
+            );
+        }
     }
 
     fn text_paint_transform(&self, state: State, paint: &Paint) -> Transform {
